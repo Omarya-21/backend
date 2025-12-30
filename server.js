@@ -12,7 +12,7 @@ const app = express();
 // CORS configuration
 const allowedOrigins = [
   'http://localhost:3000',           // React dev
-  'https://your-netlify-site.netlify.app' // Netlify frontend
+  'https://omaryamminepro.netlify.app' // Netlify frontend
 ];
 
 app.use(cors({
