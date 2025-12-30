@@ -14,8 +14,9 @@ app.use(express.json());
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://YOUR-SITE.netlify.app' // CHANGE THIS
-  ]
+    'https://omaryamminepro.netlify.app' // CHANGE THIS
+  ],
+  credentials: true
 }));
 
 /* ---------- DATABASE ---------- */
