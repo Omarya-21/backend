@@ -7,55 +7,41 @@ require('dotenv').config();
 
 const app = express();
 
-// Enhanced CORS configuration
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:5173',
-  'http://localhost:8080',
-  'https://*.netlify.app'
-];
+// ============= CONFIGURATION =============
 
+// CORS Configuration - Allow all for now, tighten in production
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, postman)
-    if (!origin) return callback(null, true);
-    
-    // Check if the origin is in allowed origins
-    if (allowedOrigins.some(allowedOrigin => {
-      if (allowedOrigin.includes('*')) {
-        const regex = new RegExp(allowedOrigin.replace('*.', '.*\.'));
-        return regex.test(origin);
-      }
-      return allowedOrigin === origin;
-    })) {
-      return callback(null, true);
-    }
-    
-    console.log('CORS blocked origin:', origin);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-  exposedHeaders: ['Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
+  credentials: true,
+  maxAge: 86400
 }));
 
 // Handle preflight requests
 app.options('*', cors());
 
-// Body parser with limits
+// Body parser with larger limits
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Request logging middleware
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
-  console.log('Origin:', req.headers.origin || 'No origin');
-  console.log('Body:', req.body);
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${req.method} ${req.originalUrl}`);
+  console.log('  Origin:', req.headers.origin || 'No origin');
+  console.log('  Content-Type:', req.headers['content-type']);
+  console.log('  Body:', req.body);
   next();
 });
 
-// Railway MySQL connection with SSL for production
+// ============= DATABASE CONNECTION =============
+
+console.log('🔧 Initializing MySQL connection...');
+console.log('  Host:', process.env.MYSQLHOST || 'localhost');
+console.log('  Port:', process.env.MYSQLPORT || '3306');
+console.log('  Database:', process.env.MYSQLDATABASE || 'railway');
+
 const pool = mysql.createPool({
   host: process.env.MYSQLHOST || 'localhost',
   port: process.env.MYSQLPORT || 3306,
@@ -65,75 +51,142 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  enableKeepAlive: true,
-  keepAliveInitialDelay: 0,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
-  connectTimeout: 10000,
-  acquireTimeout: 10000
+  ssl: process.env.NODE_ENV === 'production' ? {
+    rejectUnauthorized: false
+  } : undefined,
+  connectTimeout: 30000,
+  acquireTimeout: 30000,
+  charset: 'utf8mb4'
 });
 
-// Test database connection
-const testConnection = async () => {
+// Test database connection on startup
+const initializeDatabase = async () => {
   try {
+    console.log('🔄 Testing database connection...');
     const connection = await pool.getConnection();
-    console.log('✅ Connected to MySQL database');
-    console.log(`📊 Database: ${process.env.MYSQLDATABASE || 'railway'}`);
-    console.log(`🏷️ Host: ${process.env.MYSQLHOST || 'localhost'}`);
-    connection.release();
-    return true;
-  } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
-    return false;
-  }
-};
-
-// Initialize database
-const initDB = async () => {
-  try {
-    const conn = await pool.getConnection();
-    await conn.query(`
+    
+    // Test connection
+    const [rows] = await connection.query('SELECT 1 + 1 AS result');
+    console.log('✅ Database connection test successful:', rows[0].result);
+    
+    // Check if database exists
+    const [databases] = await connection.query('SHOW DATABASES LIKE ?', [process.env.MYSQLDATABASE || 'railway']);
+    if (databases.length === 0) {
+      console.log('⚠️ Database does not exist. Creating...');
+      await connection.query(`CREATE DATABASE IF NOT EXISTS ${process.env.MYSQLDATABASE || 'railway'}`);
+      console.log('✅ Database created');
+    }
+    
+    // Use the database
+    await connection.query(`USE ${process.env.MYSQLDATABASE || 'railway'}`);
+    
+    // Create users table
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS users (
         id INT AUTO_INCREMENT PRIMARY KEY,
         username VARCHAR(50) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_username (username)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    conn.release();
-    console.log('✅ Database table ready');
+    
+    console.log('✅ Users table ready');
+    
+    // Count existing users
+    const [userCount] = await connection.query('SELECT COUNT(*) as count FROM users');
+    console.log(`📊 Total users in database: ${userCount[0].count}`);
+    
+    connection.release();
+    console.log('✅ Database initialization complete');
+    
+    return true;
   } catch (error) {
     console.error('❌ Database initialization failed:', error.message);
+    console.error('Error code:', error.code);
+    console.error('Error SQL:', error.sql);
+    
+    // Try to create database if it doesn't exist
+    if (error.code === 'ER_BAD_DB_ERROR') {
+      console.log('🔄 Attempting to create database...');
+      try {
+        const tempConnection = await mysql.createConnection({
+          host: process.env.MYSQLHOST || 'localhost',
+          port: process.env.MYSQLPORT || 3306,
+          user: process.env.MYSQLUSER || 'root',
+          password: process.env.MYSQLPASSWORD || '',
+          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined
+        });
+        
+        await tempConnection.query(`CREATE DATABASE IF NOT EXISTS ${process.env.MYSQLDATABASE || 'railway'}`);
+        console.log('✅ Database created');
+        await tempConnection.end();
+        
+        return true;
+      } catch (createError) {
+        console.error('❌ Failed to create database:', createError.message);
+        return false;
+      }
+    }
+    
+    return false;
   }
 };
 
-// Initialize database on startup
-(async () => {
-  await testConnection();
-  await initDB();
-})();
+// ============= HELPER FUNCTIONS =============
+
+const validateUsername = (username) => {
+  if (!username || username.trim().length < 3) {
+    return 'Username must be at least 3 characters long';
+  }
+  if (username.length > 50) {
+    return 'Username must be less than 50 characters';
+  }
+  if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+    return 'Username can only contain letters, numbers, and underscores';
+  }
+  return null;
+};
+
+const validatePassword = (password) => {
+  if (!password || password.length < 6) {
+    return 'Password must be at least 6 characters long';
+  }
+  if (password.length > 100) {
+    return 'Password is too long';
+  }
+  return null;
+};
 
 // ============= ROUTES =============
 
 // Root endpoint
 app.get('/', (req, res) => {
-  res.json({ 
-    message: 'PC Parts API - Railway Backend',
+  res.json({
+    success: true,
+    message: 'PC Parts API Backend',
+    version: '1.0.0',
     status: 'online',
-    endpoints: [
-      '/api/test',
-      '/api/health',
-      '/api/register',
-      '/api/login',
-      '/api/check-auth'
-    ]
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: '/api/health',
+      test: '/api/test',
+      dbTest: '/api/test-db',
+      register: '/api/register',
+      login: '/api/login',
+      checkAuth: '/api/check-auth',
+      debug: '/api/debug-register'
+    }
   });
 });
 
-// Test endpoint
+// Simple test endpoint
 app.get('/api/test', (req, res) => {
-  res.json({ 
-    message: 'Backend is working!',
+  res.json({
+    success: true,
+    message: 'Server is working! 🚀',
     timestamp: new Date().toISOString(),
+    nodeVersion: process.version,
     environment: process.env.NODE_ENV || 'development'
   });
 });
@@ -141,131 +194,278 @@ app.get('/api/test', (req, res) => {
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
   try {
-    const conn = await pool.getConnection();
-    const [rows] = await conn.query('SELECT 1 as status');
-    conn.release();
+    const connection = await pool.getConnection();
+    const [dbResult] = await connection.query('SELECT 1 as healthy');
+    connection.release();
     
-    res.json({ 
+    res.json({
+      success: true,
       status: 'healthy',
-      database: 'connected',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
-      memory: process.memoryUsage()
+      database: 'connected',
+      memory: {
+        rss: `${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB`,
+        heapTotal: `${Math.round(process.memoryUsage().heapTotal / 1024 / 1024)}MB`,
+        heapUsed: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`
+      }
     });
   } catch (error) {
-    console.error('Health check failed:', error);
-    res.status(500).json({ 
+    res.status(500).json({
+      success: false,
       status: 'unhealthy',
+      timestamp: new Date().toISOString(),
       database: 'disconnected',
-      error: error.message,
-      timestamp: new Date().toISOString()
+      error: error.message
     });
   }
 });
 
-// Register endpoint
-app.post('/api/register', async (req, res) => {
+// Database test endpoint
+app.get('/api/test-db', async (req, res) => {
   try {
-    console.log('📝 Registration attempt received');
+    const connection = await pool.getConnection();
     
+    // Get database info
+    const [dbInfo] = await connection.query('SELECT DATABASE() as db, USER() as user, VERSION() as version');
+    
+    // Get table info
+    const [tables] = await connection.query('SHOW TABLES');
+    const tableNames = tables.map(table => Object.values(table)[0]);
+    
+    // Get user count
+    const [userCount] = await connection.query('SELECT COUNT(*) as count FROM users');
+    
+    connection.release();
+    
+    res.json({
+      success: true,
+      database: {
+        name: dbInfo[0].db,
+        user: dbInfo[0].user,
+        version: dbInfo[0].version,
+        tables: tableNames,
+        userCount: userCount[0].count
+      },
+      connection: {
+        host: process.env.MYSQLHOST || 'localhost',
+        port: process.env.MYSQLPORT || 3306
+      }
+    });
+    
+  } catch (error) {
+    console.error('Database test error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      code: error.code,
+      sqlMessage: error.sqlMessage,
+      tip: 'Check your MySQL connection settings in Railway variables'
+    });
+  }
+});
+
+// Debug registration endpoint
+app.post('/api/debug-register', async (req, res) => {
+  console.log('=== DEBUG REGISTRATION STARTED ===');
+  
+  try {
     const { username, password } = req.body;
     
-    // Validation
+    console.log('1. Request received:', { username, password: password ? '***' : 'missing' });
+    
+    // Validate input
     if (!username || !password) {
-      console.log('❌ Missing fields');
-      return res.status(400).json({ 
-        error: 'Username and password are required' 
+      console.log('2. Validation failed: Missing fields');
+      return res.status(400).json({
+        success: false,
+        error: 'Username and password are required'
       });
     }
     
-    if (username.length < 3) {
-      return res.status(400).json({ 
-        error: 'Username must be at least 3 characters long' 
-      });
-    }
-    
-    if (password.length < 6) {
-      return res.status(400).json({ 
-        error: 'Password must be at least 6 characters long' 
-      });
-    }
-    
-    // Check if user already exists
-    const conn = await pool.getConnection();
+    console.log('3. Connecting to database...');
+    const connection = await pool.getConnection();
     
     try {
-      // Check for existing user
-      const [existingUsers] = await conn.query(
+      console.log('4. Checking if user exists...');
+      const [existingUsers] = await connection.query(
         'SELECT id FROM users WHERE username = ?',
         [username]
       );
       
       if (existingUsers.length > 0) {
-        return res.status(400).json({ 
-          error: 'Username already exists' 
+        console.log('5. User already exists');
+        return res.status(400).json({
+          success: false,
+          error: 'Username already exists'
         });
       }
       
-      // Hash password and create user
+      console.log('6. Hashing password...');
       const hashedPassword = await bcrypt.hash(password, 12);
       
-      const [result] = await conn.query(
+      console.log('7. Inserting user...');
+      const [result] = await connection.query(
         'INSERT INTO users (username, password) VALUES (?, ?)',
         [username, hashedPassword]
       );
       
-      // Generate JWT token
+      console.log('8. Generating token...');
       const token = jwt.sign(
-        { 
-          userId: result.insertId, 
-          username: username 
+        {
+          userId: result.insertId,
+          username: username
+        },
+        process.env.JWT_SECRET || 'fallback-secret-change-this',
+        { expiresIn: '7d' }
+      );
+      
+      console.log('9. Registration successful!');
+      console.log(`   User ID: ${result.insertId}`);
+      console.log(`   Username: ${username}`);
+      
+      res.json({
+        success: true,
+        message: 'Registration successful (debug mode)',
+        token: token,
+        user: {
+          id: result.insertId,
+          username: username
+        },
+        debug: {
+          stepsCompleted: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+          insertId: result.insertId
+        }
+      });
+      
+    } finally {
+      connection.release();
+      console.log('10. Database connection released');
+    }
+    
+  } catch (error) {
+    console.error('❌ DEBUG ERROR:', error);
+    console.error('Error code:', error.code);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    
+    res.status(500).json({
+      success: false,
+      error: 'Debug registration failed',
+      details: error.message,
+      code: error.code,
+      step: 'Check server logs for details'
+    });
+  }
+  
+  console.log('=== DEBUG REGISTRATION ENDED ===');
+});
+
+// Main registration endpoint
+app.post('/api/register', async (req, res) => {
+  try {
+    console.log('📝 Registration attempt started');
+    
+    const { username, password } = req.body;
+    
+    // Validate input
+    const usernameError = validateUsername(username);
+    if (usernameError) {
+      console.log('❌ Username validation failed:', usernameError);
+      return res.status(400).json({
+        success: false,
+        error: usernameError
+      });
+    }
+    
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      console.log('❌ Password validation failed:', passwordError);
+      return res.status(400).json({
+        success: false,
+        error: passwordError
+      });
+    }
+    
+    console.log(`🔍 Attempting to register user: ${username}`);
+    
+    const connection = await pool.getConnection();
+    
+    try {
+      // Check if username exists
+      const [existingUsers] = await connection.query(
+        'SELECT id FROM users WHERE username = ?',
+        [username.trim()]
+      );
+      
+      if (existingUsers.length > 0) {
+        console.log('❌ Username already taken:', username);
+        return res.status(400).json({
+          success: false,
+          error: 'Username is already taken. Please choose another.'
+        });
+      }
+      
+      // Hash password
+      console.log('🔒 Hashing password...');
+      const hashedPassword = await bcrypt.hash(password, 12);
+      
+      // Insert user
+      console.log('💾 Saving user to database...');
+      const [result] = await connection.query(
+        'INSERT INTO users (username, password) VALUES (?, ?)',
+        [username.trim(), hashedPassword]
+      );
+      
+      // Generate JWT token
+      console.log('🎫 Generating authentication token...');
+      const token = jwt.sign(
+        {
+          userId: result.insertId,
+          username: username.trim()
         },
         process.env.JWT_SECRET || 'fallback-secret-key-change-in-production',
         { expiresIn: '7d' }
       );
       
-      console.log(`✅ User registered: ${username} (ID: ${result.insertId})`);
+      console.log(`✅ User registered successfully! ID: ${result.insertId}, Username: ${username}`);
       
-      res.status(201).json({ 
-        success: true, 
-        message: 'Registration successful',
+      res.status(201).json({
+        success: true,
+        message: 'Registration successful!',
         token: token,
-        user: { 
-          id: result.insertId, 
-          username: username 
+        user: {
+          id: result.insertId,
+          username: username.trim()
         }
       });
       
     } finally {
-      conn.release();
+      connection.release();
     }
     
   } catch (error) {
-    console.error('❌ Registration error:', error);
+    console.error('🔥 Registration error:', error);
     
     // Handle specific MySQL errors
+    let errorMessage = 'Registration failed. Please try again.';
+    let statusCode = 500;
+    
     if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(400).json({ 
-        error: 'Username already exists' 
-      });
+      errorMessage = 'Username is already taken.';
+      statusCode = 400;
+    } else if (error.code === 'ER_NO_SUCH_TABLE') {
+      errorMessage = 'Database table not found. Please contact administrator.';
+    } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+      errorMessage = 'Database access denied.';
+    } else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+      errorMessage = 'Database connection failed. Please try again later.';
     }
     
-    if (error.code === 'ER_ACCESS_DENIED_ERROR') {
-      return res.status(500).json({ 
-        error: 'Database access denied' 
-      });
-    }
-    
-    if (error.code === 'ECONNREFUSED') {
-      return res.status(500).json({ 
-        error: 'Database connection refused' 
-      });
-    }
-    
-    // Generic error
-    res.status(500).json({ 
-      error: 'Registration failed. Please try again later.',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    res.status(statusCode).json({
+      success: false,
+      error: errorMessage,
+      debug: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -273,29 +473,29 @@ app.post('/api/register', async (req, res) => {
 // Login endpoint
 app.post('/api/login', async (req, res) => {
   try {
-    console.log('🔑 Login attempt received');
-    
     const { username, password } = req.body;
     
-    // Validation
+    // Validate input
     if (!username || !password) {
-      return res.status(400).json({ 
-        error: 'Username and password are required' 
+      return res.status(400).json({
+        success: false,
+        error: 'Username and password are required'
       });
     }
     
-    const conn = await pool.getConnection();
+    const connection = await pool.getConnection();
     
     try {
       // Find user
-      const [users] = await conn.query(
-        'SELECT * FROM users WHERE username = ?',
-        [username]
+      const [users] = await connection.query(
+        'SELECT id, username, password FROM users WHERE username = ?',
+        [username.trim()]
       );
       
       if (users.length === 0) {
-        return res.status(401).json({ 
-          error: 'Invalid username or password' 
+        return res.status(401).json({
+          success: false,
+          error: 'Invalid username or password'
         });
       }
       
@@ -305,54 +505,52 @@ app.post('/api/login', async (req, res) => {
       const validPassword = await bcrypt.compare(password, user.password);
       
       if (!validPassword) {
-        return res.status(401).json({ 
-          error: 'Invalid username or password' 
+        return res.status(401).json({
+          success: false,
+          error: 'Invalid username or password'
         });
       }
       
-      // Generate JWT token
+      // Generate token
       const token = jwt.sign(
-        { 
-          userId: user.id, 
-          username: user.username 
+        {
+          userId: user.id,
+          username: user.username
         },
         process.env.JWT_SECRET || 'fallback-secret-key-change-in-production',
         { expiresIn: '7d' }
       );
       
-      console.log(`✅ User logged in: ${username} (ID: ${user.id})`);
-      
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         message: 'Login successful',
         token: token,
-        user: { 
-          id: user.id, 
-          username: user.username 
+        user: {
+          id: user.id,
+          username: user.username
         }
       });
       
     } finally {
-      conn.release();
+      connection.release();
     }
     
   } catch (error) {
-    console.error('❌ Login error:', error);
-    
-    res.status(500).json({ 
-      error: 'Login failed. Please try again later.',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    console.error('Login error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Login failed. Please try again.'
     });
   }
 });
 
 // Check authentication endpoint
-app.get('/api/check-auth', async (req, res) => {
+app.get('/api/check-auth', (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.json({ 
+      return res.json({
         isLoggedIn: false,
         message: 'No token provided'
       });
@@ -362,26 +560,11 @@ app.get('/api/check-auth', async (req, res) => {
     
     // Verify token
     const decoded = jwt.verify(
-      token, 
+      token,
       process.env.JWT_SECRET || 'fallback-secret-key-change-in-production'
     );
     
-    // Optional: Check if user still exists in database
-    const conn = await pool.getConnection();
-    const [users] = await conn.query(
-      'SELECT id, username FROM users WHERE id = ?',
-      [decoded.userId]
-    );
-    conn.release();
-    
-    if (users.length === 0) {
-      return res.json({ 
-        isLoggedIn: false,
-        message: 'User no longer exists'
-      });
-    }
-    
-    res.json({ 
+    res.json({
       isLoggedIn: true,
       user: {
         id: decoded.userId,
@@ -391,110 +574,119 @@ app.get('/api/check-auth', async (req, res) => {
     
   } catch (error) {
     if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
-      return res.json({ 
+      return res.json({
         isLoggedIn: false,
         message: 'Invalid or expired token'
       });
     }
     
-    console.error('❌ Check auth error:', error);
-    res.json({ 
+    console.error('Auth check error:', error);
+    res.json({
       isLoggedIn: false,
       message: 'Authentication check failed'
     });
   }
 });
 
-// Database info endpoint (for debugging)
-app.get('/api/db-info', async (req, res) => {
+// Get all users (for debugging - remove in production)
+app.get('/api/users', async (req, res) => {
   try {
-    const conn = await pool.getConnection();
-    const [users] = await conn.query('SELECT COUNT(*) as count FROM users');
-    const [tables] = await conn.query('SHOW TABLES');
-    conn.release();
+    const connection = await pool.getConnection();
+    const [users] = await connection.query(
+      'SELECT id, username, created_at FROM users ORDER BY created_at DESC'
+    );
+    connection.release();
     
     res.json({
-      userCount: users[0].count,
-      tables: tables.map(t => Object.values(t)[0]),
-      database: process.env.MYSQLDATABASE,
-      host: process.env.MYSQLHOST
+      success: true,
+      count: users.length,
+      users: users
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching users:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch users'
+    });
   }
 });
 
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({
+    success: false,
     error: 'Endpoint not found',
-    path: req.url,
-    method: req.method
+    path: req.originalUrl,
+    method: req.method,
+    availableEndpoints: [
+      'GET /',
+      'GET /api/test',
+      'GET /api/health',
+      'GET /api/test-db',
+      'POST /api/register',
+      'POST /api/login',
+      'GET /api/check-auth',
+      'POST /api/debug-register'
+    ]
   });
 });
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error('🔥 Unhandled error:', err);
+  console.error('🔥 Global error handler:', err);
   
-  // CORS errors
-  if (err.message === 'Not allowed by CORS') {
-    return res.status(403).json({
-      error: 'CORS error',
-      message: 'Request blocked by CORS policy',
-      origin: req.headers.origin,
-      allowedOrigins: allowedOrigins
-    });
-  }
-  
-  // JWT errors
-  if (err.name === 'JsonWebTokenError') {
-    return res.status(401).json({ 
-      error: 'Invalid token' 
-    });
-  }
-  
-  if (err.name === 'TokenExpiredError') {
-    return res.status(401).json({ 
-      error: 'Token expired' 
-    });
-  }
-  
-  // Default error
-  res.status(err.status || 500).json({
+  res.status(500).json({
+    success: false,
     error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : undefined,
-    timestamp: new Date().toISOString()
+    message: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
 
-// Start server
-const PORT = process.env.PORT || 10000;
-const HOST = '0.0.0.0';
+// ============= START SERVER =============
 
-app.listen(PORT, HOST, () => {
-  console.log('='.repeat(50));
-  console.log(`🚀 Server started successfully!`);
-  console.log(`📡 Port: ${PORT}`);
-  console.log(`🏠 Host: ${HOST}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🗄️ Database: ${process.env.MYSQLDATABASE || 'railway'}`);
-  console.log(`🔗 CORS Origins: ${allowedOrigins.join(', ')}`);
-  console.log('='.repeat(50));
-  console.log(`✅ API is ready at http://${HOST}:${PORT}`);
-  console.log(`✅ Health check: http://${HOST}:${PORT}/api/health`);
-  console.log('='.repeat(50));
+const startServer = async () => {
+  console.log('🚀 Starting server initialization...');
+  
+  // Initialize database
+  const dbInitialized = await initializeDatabase();
+  
+  if (!dbInitialized) {
+    console.error('❌ Failed to initialize database. Server may not work correctly.');
+    console.log('💡 Tip: Check Railway MySQL connection variables');
+  }
+  
+  const PORT = process.env.PORT || 10000;
+  
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log('='.repeat(60));
+    console.log('✅ SERVER STARTED SUCCESSFULLY');
+    console.log('='.repeat(60));
+    console.log(`🌐 Server URL: http://localhost:${PORT}`);
+    console.log(`📡 External URL: https://your-railway-app.up.railway.app`);
+    console.log(`⚙️  Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🗄️  Database: ${dbInitialized ? 'Connected ✅' : 'Failed ❌'}`);
+    console.log(`🔐 JWT Secret: ${process.env.JWT_SECRET ? 'Set ✅' : 'Using fallback ⚠️'}`);
+    console.log('='.repeat(60));
+    console.log('📋 Available Endpoints:');
+    console.log(`   • GET  /              - Server info`);
+    console.log(`   • GET  /api/test      - Basic test`);
+    console.log(`   • GET  /api/health    - Health check`);
+    console.log(`   • GET  /api/test-db   - Database test`);
+    console.log(`   • POST /api/register  - Register user`);
+    console.log(`   • POST /api/login     - Login user`);
+    console.log(`   • POST /api/debug-register - Debug registration`);
+    console.log('='.repeat(60));
+  });
+};
+
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+  console.error('💥 Uncaught Exception:', error);
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully...');
-  pool.end();
-  process.exit(0);
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-process.on('SIGINT', () => {
-  console.log('SIGINT received. Shutting down gracefully...');
-  pool.end();
-  process.exit(0);
-});
+// Start the server
+startServer();
