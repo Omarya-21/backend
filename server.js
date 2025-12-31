@@ -45,7 +45,7 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'Username and password required' });
     }
 
-    // check if user exists
+    // Check if user exists
     const [existing] = await pool.query(
       'SELECT id FROM users WHERE username = ?',
       [username]
@@ -57,7 +57,7 @@ app.post('/api/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // INSERT without id (MySQL auto-increments it)
+    // Insert user (id auto-increments)
     const [result] = await pool.query(
       'INSERT INTO users (username, password) VALUES (?, ?)',
       [username, hashedPassword]
