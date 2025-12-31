@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const mysql = require('mysql2/promise');
+const mysql = require('mysql2/promise'); // works for PostgreSQL via pg-mysql bridge or MySQL; if using pure PostgreSQL, you can switch to 'pg'
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
@@ -57,7 +57,7 @@ app.post('/api/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Insert user (id auto-increments)
+    // INSERT without id (SERIAL handles auto-increment)
     const [result] = await pool.query(
       'INSERT INTO users (username, password) VALUES (?, ?)',
       [username, hashedPassword]
