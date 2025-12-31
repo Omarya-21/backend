@@ -42,40 +42,48 @@ app.post('/api/register', async (req, res) => {
     const { username, password } = req.body;
 
     if (!username || !password) {
-      return res.status(400).json({ error: 'Missing fields' });
+      return res.status(400).json({ error: 'Username and password required' });
     }
 
-    // Check if user exists
-    const [existing] = await pool.query(
-      'SELECT id FROM users WHERE username = ?',
-      [username]
-    );
+    const connection = await pool.getConnection();
 
-    if (existing.length > 0) {
-      return res.status(400).json({ error: 'Username already exists' });
+    try {
+      // check if user exists
+      const [existing] = await connection.query(
+        'SELECT id FROM users WHERE username = ?',
+        [username]
+      );
+
+      if (existing.length > 0) {
+        return res.status(400).json({ error: 'Username already exists' });
+      }
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // 👇 IMPORTANT FIX
+      const [result] = await connection.query(
+        'INSERT INTO users (id, username, password) VALUES (NULL, ?, ?)',
+        [username, hashedPassword]
+      );
+
+      const token = jwt.sign(
+        { userId: result.insertId, username },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+
+      res.status(201).json({
+        token,
+        user: { id: result.insertId, username }
+      });
+
+    } finally {
+      connection.release();
     }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const [result] = await pool.query(
-      'INSERT INTO users (username, password) VALUES (?, ?)',
-      [username, hashedPassword]
-    );
-
-    const token = jwt.sign(
-      { id: result.insertId, username },
-      process.env.JWT_SECRET,
-      { expiresIn: '1d' }
-    );
-
-    res.status(201).json({
-      token,
-      user: { id: result.insertId, username }
-    });
 
   } catch (err) {
     console.error('REGISTER ERROR:', err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Registration failed' });
   }
 });
 
