@@ -10,7 +10,7 @@ const app = express();
 /* ------------------ CORS ------------------ */
 const allowedOrigins = [
   'http://localhost:3000',
-  'https://omaryamminepro.netlify.app' // 🔴 CHANGE THIS
+  'https://omaryamminepro.netlify.app'
 ];
 
 app.use(cors({
@@ -45,41 +45,34 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'Username and password required' });
     }
 
-    const connection = await pool.getConnection();
+    // check if user exists
+    const [existing] = await pool.query(
+      'SELECT id FROM users WHERE username = ?',
+      [username]
+    );
 
-    try {
-      // check if user exists
-      const [existing] = await connection.query(
-        'SELECT id FROM users WHERE username = ?',
-        [username]
-      );
-
-      if (existing.length > 0) {
-        return res.status(400).json({ error: 'Username already exists' });
-      }
-
-      const hashedPassword = await bcrypt.hash(password, 10);
-
-      // 👇 IMPORTANT FIX
-      const [result] = await connection.query(
-        'INSERT INTO users (id, username, password) VALUES (NULL, ?, ?)',
-        [username, hashedPassword]
-      );
-
-      const token = jwt.sign(
-        { userId: result.insertId, username },
-        process.env.JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      res.status(201).json({
-        token,
-        user: { id: result.insertId, username }
-      });
-
-    } finally {
-      connection.release();
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'Username already exists' });
     }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // INSERT without id (MySQL auto-increments it)
+    const [result] = await pool.query(
+      'INSERT INTO users (username, password) VALUES (?, ?)',
+      [username, hashedPassword]
+    );
+
+    const token = jwt.sign(
+      { userId: result.insertId, username },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.status(201).json({
+      token,
+      user: { id: result.insertId, username }
+    });
 
   } catch (err) {
     console.error('REGISTER ERROR:', err);
@@ -125,8 +118,8 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-/* ------------------ START ------------------ */
-const PORT = process.env.PORT || 10000;
+/* ------------------ START SERVER ------------------ */
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
